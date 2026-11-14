@@ -9,15 +9,21 @@
   * { box-sizing: border-box; margin: 0; font-family: system-ui, sans-serif; }
   body { background: #f4f6f2; color: #222; max-width: 560px; margin: 0 auto; padding: 16px; }
   h1 { font-size: 22px; margin: 12px 0; text-align: center; }
-  #video { width: 100%; border-radius: 12px; background: #000; display: block; }
+  #videoWrap { position: relative; width: 100%; }
+  #video { width: 100%; border-radius: 12px; background: #000; display: block;
+           object-fit: cover; aspect-ratio: 4 / 3; }
+  /* Если картинка с камеры повёрнута — раскомментируйте одну из строк ниже */
+  /* #video { transform: rotate(90deg); }   <- поворот на 90 градусов */
+  /* #video { transform: scaleX(-1); }      <- зеркальное отражение */
+  .err { margin-top: 10px; padding: 10px; border-radius: 8px; background: #fde8e8; color: #a33; font-size: 14px; }
   #controls { text-align: center; margin-top: 10px; }
   button { padding: 10px 18px; border: none; border-radius: 8px; background: #2f6fd6; color: #fff; font-size: 16px; margin: 4px; cursor: pointer; }
+  button.demo { background: #4a9c3f; }
   .manual-row { display: flex; gap: 8px; margin-top: 8px; }
   .manual-row input { flex: 1; padding: 10px; font-size: 16px; border-radius: 8px; border: 1px solid #ccc; }
   #result { margin-top: 16px; padding: 16px; border-radius: 12px; background: #fff; box-shadow: 0 2px 8px rgba(0,0,0,.08); display: none; }
   #result img { max-width: 120px; border-radius: 8px; float: right; margin-left: 12px; }
   .material { margin-top: 12px; padding: 12px; border-radius: 10px; font-size: 17px; font-weight: 600; background: #dce9ff; border: 2px solid #2f6fd6; }
-  .unknown { background: #eee; border-color: #888; }
   .guess { background: #fff3d6; border-color: #d6a72f; }
   .disposal { margin-top: 8px; padding: 12px; border-radius: 10px; font-size: 16px; background: #e4f4e0; border: 2px solid #4a9c3f; }
   .note { font-size: 13px; color: #666; margin-top: 10px; }
@@ -27,10 +33,14 @@
 
 <h1>Сканер упаковки</h1>
 
-<video id="video" autoplay muted playsinline></video>
+<div id="videoWrap">
+  <video id="video" autoplay muted playsinline></video>
+</div>
+<div id="camError"></div>
 
 <div id="controls">
   <button id="scanBtn" onclick="toggleScan()">Сканировать камерой</button>
+  <button class="demo" onclick="showExample()">Показать пример</button>
 </div>
 
 <div class="manual-row">
@@ -52,13 +62,37 @@ let detector = null;
 let zxingReader = null;
 let stream = null;
 
+// ===== ПРИМЕР РАБОТЫ (демо без камеры) =====
+function showExample() {
+  stopScan();
+  document.getElementById('result').style.display = 'block';
+  document.getElementById('productInfo').innerHTML =
+    '<b>Молоко «Простоквашино» 2,5%</b><br>Простоквашино (демо-пример)';
+  document.getElementById('materialInfo').innerHTML =
+    '<div class="material guess">Упаковка: предположительно PET-бутылка (пластик, маркировка 1).<br>' +
+    '<span style="font-weight:400;font-size:14px">Уточните по значку на дне бутылки.</span></div>' +
+    '<div class="disposal">Куда выбрасывать: контейнер для сухого вторсырья (пластик). Перед выбросом ополоснуть.</div>';
+}
+
 // ===== 1. СКАНИРОВАНИЕ ШТРИХКОДА =====
 async function toggleScan() {
   if (scanning) return stopScan();
+  document.getElementById('camError').innerHTML = '';
   scanning = true;
   document.getElementById('scanBtn').textContent = 'Остановить камеру';
 
-  stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment' } });
+  try {
+    stream = await navigator.mediaDevices.getUserMedia({
+      video: { facingMode: 'environment', width: { ideal: 1280 }, height: { ideal: 720 } }
+    });
+  } catch (e) {
+    scanning = false;
+    document.getElementById('scanBtn').textContent = 'Сканировать камерой';
+    document.getElementById('camError').innerHTML =
+      '<div class="err">Камера не запустилась: ' + e.name + '. Разрешите доступ к камере в настройках браузера.</div>';
+    return;
+  }
+
   video.srcObject = stream;
 
   if ('BarcodeDetector' in window) {
@@ -93,6 +127,7 @@ async function lookup(code) {
   code = String(code).replace(/\D/g, '');
   if (!code) return;
 
+  stopScan();
   const box = document.getElementById('result');
   box.style.display = 'block';
   document.getElementById('productInfo').innerHTML = 'Ищем товар в базе…';
@@ -122,14 +157,12 @@ async function lookup(code) {
     (p.image_front_url ? '<img src="' + p.image_front_url + '">' : '') +
     '<b>' + name + '</b><br>' + (p.brands || '');
 
-  // Текст об упаковке из базы: поля packaging_materials, packaging_tags, packaging
   const packText = [
     (p.packaging_materials || []).map(m => (m && m.id) || m).join(', '),
     (p.packaging_tags || []).join(', '),
     p.packaging || ''
   ].filter(Boolean).join(', ').trim();
 
-  // Категории товара — для предположения, если материал в базе не указан
   const catText = [
     (p.categories_tags || []).join(', '),
     p.categories || ''
@@ -152,15 +185,14 @@ const MATERIALS = [
   ['Тетрапак',                               /(tetra|тетрапак|carton brick|brick)/i]
 ];
 
-// Если материал не указан в базе — предполагаем по типу товара (категории)
 const GUESS = [
-  ['PET-бутылка (пластик, маркировка 1)',   /(milk|молок|kefir|кефир|yogurt|йогурт|sour-cream|сметан|cream|вода|water|juice|сок|lemonade|лимонад|soda|напиток|beverage|tea|чай|oil|масло|ketchup|кетчуп|sauce|соус)/],
-  ['Тетрапак (пакет из картона и фольги)',  /(juice|сок|nectar|нектар|milk|молок|cocktail|коктейль)/],
-  ['Алюминиевая банка (металл)',            /(beer|пиво|soda|газирован|cola|кола|energy|энергетик|canned|консерв|tuna|тунец|beans|боб)/],
-  ['Стеклянная банка или бутылка (стекло)', /(jar|банк|beer|пиво|jam|варенье|honey|мёд|sauce|соус|preserve|консерв|baby-food|детское-питание)/],
+  ['Тетрапак (пакет из картона и фольги)',  /(juice|сок|nectar|нектар|milk|молок|kefir|кефир|cocktail|коктейль)/],
+  ['PET-бутылка (пластик, маркировка 1)',   /(milk|молок|вода|water|lemonade|лимонад|soda|напиток|beverage|oil|масло|ketchup|кетчуп|sauce|соус)/],
+  ['Алюминиевая банка (металл)',            /(beer|пиво|cola|кола|energy|энергетик|canned|консерв|tuna|тунец|beans|боб)/],
+  ['Стеклянная банка или бутылка (стекло)', /(jar|банк|jam|варенье|honey|мёд|preserve|консерв|baby-food|детское-питание)/],
   ['Банка из полипропилена (пластик, 5)',   /(yogurt|йогурт|sour-cream|сметан|cottage-cheese|творог|cheese|сыр|butter|масло-сливочн|margarine|маргарин|ice-cream|мороженое)/],
-  ['Плёнка или пакет (пластик, маркировка 4)', /(chips|чипс|candy|конфет|sweet|сладост|snack|снек|chocolate|шоколад|cookie|печенье|cracker|кекс|bread|хлеб|bakery|выпечка|sausage|колбас|sausage|сосиск|dumpling|пельмен)/],
-  ['Картонная коробка (бумага/картон)',     /(pasta|макарон|cereal|хлопья|muesli|мюсли|flour|мука|sugar|сахар|rice|рис|grain|крупа|tea|чай|coffee|кофе|egg|яйц|cookie|печенье|waffle|вафли|pizza|пицца|baking|выпечка)/]
+  ['Плёнка или пакет (пластик, маркировка 4)', /(chips|чипс|candy|конфет|sweet|сладост|snack|снек|chocolate|шоколад|cookie|печенье|bread|хлеб|bakery|выпечка|sausage|колбас|сосиск|dumpling|пельмен)/],
+  ['Картонная коробка (бумага/картон)',     /(pasta|макарон|cereal|хлопья|muesli|мюсли|flour|мука|sugar|сахар|rice|рис|grain|крупа|tea|чай|coffee|кофе|egg|яйц|waffle|вафли|pizza|пицца)/]
 ];
 
 const DISPOSAL = {
@@ -182,7 +214,6 @@ function disposalFor(label) {
 }
 
 function buildMaterialInfo(packText, catText) {
-  // 1) Материал указан в базе — показываем его как точный
   if (packText) {
     for (const [label, regex] of MATERIALS) {
       if (regex.test(packText)) {
@@ -194,7 +225,6 @@ function buildMaterialInfo(packText, catText) {
            '<div class="disposal">' + DISPOSAL.unknown + '</div>';
   }
 
-  // 2) Материала в базе нет — предполагаем по категории товара
   for (const [label, regex] of GUESS) {
     if (regex.test(catText)) {
       return '<div class="material guess">Упаковка: предположительно ' + label +
@@ -203,7 +233,6 @@ function buildMaterialInfo(packText, catText) {
     }
   }
 
-  // 3) Ни материала, ни узнаваемой категории
   return '<div class="material unknown">Упаковку определить не удалось</div>' +
          '<div class="disposal">' + DISPOSAL.unknown + '</div>';
 }
